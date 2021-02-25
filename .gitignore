@@ -1,0 +1,5 @@
+.venv
+.vscode
+/auth
+/data_unzipped
+/data_zipped
