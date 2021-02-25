@@ -57,15 +57,14 @@ unzipped = './data_unzipped/'
 #     zip_ref.close()
 # shutil.rmtree('./data_unzipped/__MACOSX') # Deletes an extraneous folder
 
-#%%
 # Transforms and cleans the CSV files
 station_schema = ['station id', 'station name', 'station longitude', 'station latitude']
 stations = pd.DataFrame(columns = station_schema)
 
 for file in os.listdir(unzipped):
-    if file.endswith(".csv"):
+    if file.endswith(".csv") and file not in processed:
         df = pd.read_csv(unzipped + file)
-        df.fillna(0, inplace=True)
+        print(f'\nProcessing {file}')
 
         # Standardizes the column names for all CSV files
         df = df.rename(columns=({'Trip Duration':'tripduration',
@@ -83,6 +82,18 @@ for file in os.listdir(unzipped):
                                 'User Type':'usertype',
                                 'Birth Year':'birth year',
                                 'Gender': 'gender'}))
+        
+        # Cleans NaN data
+        df['usertype'].fillna('', inplace=True)
+        df['birth year'].fillna(0, inplace=True)
+        miss_start = sum(df['start station id'].isna())
+        if miss_start > 0:
+            df.dropna(subset=['start station id'], inplace=True)
+            print(f'{miss_start} rides were dropped.')
+        miss_end = sum(df['end station id'].isna())
+        if miss_end > 0:
+            df.dropna(subset=['end station id'], inplace=True)
+            print(f'{miss_end} rides were dropped.')
 
 
         # Strips milliseconds from timestamp
@@ -130,6 +141,7 @@ for file in os.listdir(unzipped):
         for error in cur.getbatcherrors():
             print("Error", error.message, "at row offset", error.offset)
         connection.commit()
+        print(f'{len(new_stations)} stations has been inserted.')
 
         # Find existing stations that require update
         check_id = list(set(new_station_id) & set(exist_station_id))
@@ -151,16 +163,29 @@ for file in os.listdir(unzipped):
         for error in cur.getbatcherrors():
             print("Error", error.message, "at row offset", error.offset)
         connection.commit()
-        
+        print(f'{len(stations_to_update)} stations has been updated.')
+
         # Batch insert the ride info into the table ride
         rides = df[['tripduration', 'starttime', 'stoptime', 'start station id', 'end station id', 'bikeid', 'usertype', 'birth year', 'gender']]
         rides = rides.to_records(index=False).tolist()  # Convert df to a list of tuples
-        cur.executemany("""
-            INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
-            VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides, batcherrors=True)
-        for error in cur.getbatcherrors():
-            print("Error", error.message, "at row offset", error.offset)
-
+        n = int(1e6)
+        if len(rides) > n:
+            split_rides = [rides[i * n:(i + 1) * n] for i in range((len(rides) + n - 1) // n)]  # Breaks up batch insert to size of n = 1e6
+            for rides_chunk in split_rides:
+                cur.executemany("""
+                    INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
+                    VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides_chunk, batcherrors=True)
+                for error in cur.getbatcherrors():
+                    print("Error", error.message, "at row offset", error.offset)
+                connection.commit()
+                print(f'{len(rides_chunk)} rides has been inserted.')
+        else:
+            cur.executemany("""
+                INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
+                VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides, batcherrors=True)
+            for error in cur.getbatcherrors():
+                print("Error", error.message, "at row offset", error.offset)
+            print(f'{len(rides)} rides has been inserted.')
 
         # Updated the TABLE data_processed
         cur.execute("""INSERT INTO admin.data_processed VALUES(:filename)""", filename = file)
@@ -172,19 +197,3 @@ for file in os.listdir(unzipped):
         # df.to_csv(unzipped + file, index = None)
 cur.close()
 connection.close()
-#%%
-#################################################            CONNECT TO DATABASE
-# Connect to Oracle Autonomous Data Warehouse using Wallet and local config for user/pw storage
-import cx_Oracle
-import configparser
-config = configparser.ConfigParser()
-config.read('./auth/config.ini')
-username = config.get('oracle', 'username')
-password = config.get('oracle', 'password')
-connection = cx_Oracle.connect(username, password, 'dwaproject_high')
-
-#%%
-####################################################### TESTING DB CONNECTION
-with connection.cursor() as cur:
-    for i in cur.execute("select * from admin.station"):
-        print(i)
