@@ -1,4 +1,3 @@
-#%%
 import requests
 from bs4 import BeautifulSoup
 import shutil
@@ -7,6 +6,8 @@ from zipfile import ZipFile
 import cx_Oracle
 import configparser
 import pandas as pd
+
+cleanup = False # Variable to control file deletion after processing
 
 # Connect to Oracle Autonomous Data Warehouse using Wallet and local config file for user/pw storage
 config = configparser.ConfigParser()
@@ -55,6 +56,8 @@ unzipped = './data_unzipped/'
 #     zip_ref = ZipFile(zipped + file)
 #     zip_ref.extractall(unzipped)
 #     zip_ref.close()
+#     if cleanup:
+#         os.remove(zipped + file) # Deletes zip after extraction
 # shutil.rmtree('./data_unzipped/__MACOSX') # Deletes an extraneous folder
 
 # Transforms and cleans the CSV files
@@ -158,8 +161,8 @@ for file in os.listdir(unzipped):
         # Batch update new station info into table station
         cur.executemany("""
             UPDATE admin.station 
-            SET stationname = :1, stationlong = :2, stationlat = :3
-            WHERE stationid=: 4 """, stations_to_update, batcherrors=True)
+            SET stationname = :1, stationlat = :2, stationlong = :3
+            WHERE stationid = :4 """, stations_to_update, batcherrors=True)
         for error in cur.getbatcherrors():
             print("Error", error.message, "at row offset", error.offset)
         connection.commit()
@@ -192,7 +195,10 @@ for file in os.listdir(unzipped):
         
         # Commit the ride and data_processed insert into the database
         connection.commit()
-        
+
+        if cleanup:
+            os.remove(unzipped + file) # Delete CSV after processing
+
         # Save the updated file
         # df.to_csv(unzipped + file, index = None)
 cur.close()
