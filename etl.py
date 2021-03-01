@@ -199,7 +199,7 @@ for file in os.listdir(unzipped):
             print(f'{len(rides) - len(cur.getbatcherrors())} rides has been inserted.')
 
         # Updated the TABLE data_processed
-        cur.execute("""INSERT INTO admin.data_processed VALUES(:filename)""", filename = file)
+        cur.execute("""INSERT INTO admin.data_processed VALUES(:filename)""", filename = file + ".zip")
         connection.commit()
 
         if cleanup:
