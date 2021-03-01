@@ -1,3 +1,4 @@
+#%%
 import requests
 from bs4 import BeautifulSoup
 import shutil
@@ -25,10 +26,11 @@ data_files = soup.find_all('key')
 zip_files = []
 try:
     for file in range(len(data_files) - 1):
-        if '2013' in data_files[file].get_text() or '2014' in data_files[file].get_text() or '2015' in data_files[file].get_text():
-            pass
-        else:
-            zip_files.append(data_files[file].get_text())
+        zip_files.append(data_files[file].get_text())
+        # if '2013' in data_files[file].get_text() or '2014' in data_files[file].get_text() or '2015' in data_files[file].get_text():
+        #     pass
+        # else:
+        #     zip_files.append(data_files[file].get_text())
 except Exception as e:
     print(f"Failed {e}")
 
@@ -36,16 +38,18 @@ except Exception as e:
 # Check if files to be downloaded has already been processed
 processed = [filename for filename in cur.execute("SELECT * FROM admin.data_processed")]
 processed = [filename for tup in processed for filename in tup] # Convert list of tuples to list of string
-zip_files = list(set(zip_files) - set(processed))
+new_zips = list(set(zip_files) - set(processed))
 
 
 # Downloads zip files into a subfolder called data_zipped
-# zipped = './data_zipped/'
+zipped = './data_zipped/'
 # if not os.path.exists(zipped):
 #     os.makedirs(zipped)
-# for file in zip_files:
+# print(f'Identified {len(new_zips)} new file(s).')
+# for file in new_zips:
 #     with open(zipped + file, 'wb') as f:
 #         f.write(requests.get(url + file).content)
+#         print(f'...downloading {file}')
 
 
 # # Extracts all CSV files into a subfolder called data_unzipped
@@ -53,12 +57,14 @@ unzipped = './data_unzipped/'
 # if not os.path.exists(unzipped):
 #     os.makedirs(unzipped)
 # for file in os.listdir(zipped):
+#     print(f'...extracting {file}')
 #     zip_ref = ZipFile(zipped + file)
 #     zip_ref.extractall(unzipped)
 #     zip_ref.close()
 #     if cleanup:
 #         os.remove(zipped + file) # Deletes zip after extraction
-# shutil.rmtree('./data_unzipped/__MACOSX') # Deletes an extraneous folder
+# shutil.rmtree('./data_unzipped/__MACOSX')  # Deletes an extraneous folder
+# print(f'\nMACOSX folder deleted')
 
 # Transforms and cleans the CSV files
 station_schema = ['station id', 'station name', 'station longitude', 'station latitude']
@@ -88,7 +94,8 @@ for file in os.listdir(unzipped):
         
         # Cleans NaN data
         df['usertype'].fillna('', inplace=True)
-        df['birth year'].fillna(0, inplace=True)
+        df['birth year'] = pd.to_numeric(df['birth year'], errors='coerce') # Forces string values to NaN
+        df['birth year'].fillna(0, inplace=True) # Changes NaN to 0
         miss_start = sum(df['start station id'].isna())
         if miss_start > 0:
             df.dropna(subset=['start station id'], inplace=True)
@@ -144,7 +151,7 @@ for file in os.listdir(unzipped):
         for error in cur.getbatcherrors():
             print("Error", error.message, "at row offset", error.offset)
         connection.commit()
-        print(f'{len(new_stations)} stations has been inserted.')
+        print(f'{len(new_stations) - len(cur.getbatcherrors())} stations has been inserted.')
 
         # Find existing stations that require update
         check_id = list(set(new_station_id) & set(exist_station_id))
@@ -166,14 +173,14 @@ for file in os.listdir(unzipped):
         for error in cur.getbatcherrors():
             print("Error", error.message, "at row offset", error.offset)
         connection.commit()
-        print(f'{len(stations_to_update)} stations has been updated.')
+        print(f'{len(stations_to_update) - len(cur.getbatcherrors())} stations has been updated.')
 
         # Batch insert the ride info into the table ride
         rides = df[['tripduration', 'starttime', 'stoptime', 'start station id', 'end station id', 'bikeid', 'usertype', 'birth year', 'gender']]
         rides = rides.to_records(index=False).tolist()  # Convert df to a list of tuples
-        n = int(1e6)
+        n = int(5e5)
         if len(rides) > n:
-            split_rides = [rides[i * n:(i + 1) * n] for i in range((len(rides) + n - 1) // n)]  # Breaks up batch insert to size of n = 1e6
+            split_rides = [rides[i * n:(i + 1) * n] for i in range((len(rides) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
             for rides_chunk in split_rides:
                 cur.executemany("""
                     INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
@@ -181,19 +188,18 @@ for file in os.listdir(unzipped):
                 for error in cur.getbatcherrors():
                     print("Error", error.message, "at row offset", error.offset)
                 connection.commit()
-                print(f'{len(rides_chunk)} rides has been inserted.')
+                print(f'{len(rides_chunk) - len(cur.getbatcherrors())} rides has been inserted.')
         else:
             cur.executemany("""
                 INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
                 VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides, batcherrors=True)
             for error in cur.getbatcherrors():
                 print("Error", error.message, "at row offset", error.offset)
-            print(f'{len(rides)} rides has been inserted.')
+            connection.commit()
+            print(f'{len(rides) - len(cur.getbatcherrors())} rides has been inserted.')
 
         # Updated the TABLE data_processed
         cur.execute("""INSERT INTO admin.data_processed VALUES(:filename)""", filename = file)
-        
-        # Commit the ride and data_processed insert into the database
         connection.commit()
 
         if cleanup:
