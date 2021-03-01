@@ -6,6 +6,8 @@
 
 # Setup
 
+Once the database is running, run the create.sql statements to setup the tables and its relationships.
+
 Create a folder called auth in the root directory. 
 Extract the contents of the wallet file into this folder. 
 Create a config.ini file and populate it with the below 3 lines.
