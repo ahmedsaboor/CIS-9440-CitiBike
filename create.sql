@@ -15,7 +15,7 @@ CREATE TABLE ride (
 	duration 		number,
 	starttime 		date,
 	stoptime 		date, 
-	startstation 	number,
+	startstation 		number,
 	endstation 		number,
 	bikeid 			number, 
 	usertype 		varchar2(10), 
