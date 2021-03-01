@@ -1,4 +1,3 @@
-```SQL
 CREATE TABLE station (
 	stationid		number NOT NULL,
 	stationname		varchar2(60),
@@ -34,4 +33,3 @@ CREATE TABLE data_processed (
 INSERT INTO gender VALUES (0, 'Unknown');
 INSERT INTO gender VALUES (1, 'Male');
 INSERT INTO gender VALUES (2, 'Female');
-```
