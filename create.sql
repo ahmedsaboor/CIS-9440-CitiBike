@@ -1,6 +1,6 @@
 CREATE TABLE city (
 	zipcode			varchar2(10),
-	neighborhood	varchar2(50),
+	neighborhood		varchar2(50),
 	borough			varchar2(20),
 	city			varchar2(30),
 	county			varchar2(30),
@@ -24,14 +24,13 @@ CREATE TABLE station (
 CREATE TABLE gender (
 	genderid		number NOT NULL,
 	gender			varchar2(7),
-	primary key (genderid)
-);
+	primary key (genderid));
 
 CREATE TABLE ride (
 	duration 		number,
 	starttime 		date,
 	stoptime 		date, 
-	startstation 	number,
+	startstation 		number,
 	endstation 		number,
 	bikeid 			number, 
 	usertype 		varchar2(10), 
