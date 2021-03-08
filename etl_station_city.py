@@ -81,7 +81,6 @@ for row, pair in enumerate(coord):
     county = False
     state = False
     all_flag = False
-    in_city_df = False
 
 
     # A temp dataframe is used to store the relevant information
@@ -89,7 +88,6 @@ for row, pair in enumerate(coord):
     temp_df = pd.DataFrame(columns=['zipcode', 'neighborhood', 'borough', 'city', 'county', 'state'])
     # The nested for loop is used to populate the zip code column in station_df, which will be used to populate the DB table station
     # It is also used to create the city_df, which will be used to populate the DB table city
-    # This loop took longer to complete than I expected, may need to review for optimizations
     for data in geocode['results']:
         for add_comp in data['address_components']:
             if 'postal_code' in add_comp['types'] and not postalcode:
@@ -97,28 +95,28 @@ for row, pair in enumerate(coord):
                 zipcodes.append(add_comp['long_name'])
                 temp_df.at[0,'zipcode'] = add_comp['long_name']
                 if city_df['zipcode'].isin([add_comp['long_name']]).any():
-                    in_city_df = True
-            elif 'neighborhood' in add_comp['types'] and not neighborhood and not in_city_df:
+                    all_flag = True
+                    break
+            elif 'neighborhood' in add_comp['types'] and not neighborhood:
                 neighborhood = True
                 temp_df.at[0,'neighborhood'] = add_comp['long_name']
-            elif 'sublocality' in add_comp['types'] and not borough and not in_city_df:
+            elif 'sublocality' in add_comp['types'] and not borough:
                 borough = True
                 temp_df.at[0, 'borough'] = add_comp['long_name']
-            elif 'locality' in add_comp['types'] and not city and not in_city_df:
+            elif 'locality' in add_comp['types'] and not city:
                 city = True
                 temp_df.at[0,'city'] = add_comp['long_name']
-            elif 'administrative_area_level_2' in add_comp['types'] and not county and not in_city_df:
+            elif 'administrative_area_level_2' in add_comp['types'] and not county:
                 county = True
                 temp_df.at[0,'county'] = add_comp['long_name']
-            elif 'administrative_area_level_1' in add_comp['types'] and not state and not in_city_df:
+            elif 'administrative_area_level_1' in add_comp['types'] and not state:
                 state = True
                 if add_comp['long_name'] == 'New Jersey': # Borough is only for NY as NJ doesn't have any boroughs, so the variable is set True if NJ
                     borough = True 
                 temp_df.at[0,'state'] = add_comp['long_name']
             if postalcode and neighborhood and borough and city and county and state:
                 all_flag = True
-                if in_city_df == False:
-                    city_df = city_df.append(temp_df, ignore_index=True) 
+                city_df = city_df.append(temp_df, ignore_index=True) 
                 break
         if all_flag:
             break
