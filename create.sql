@@ -43,6 +43,7 @@ CREATE TABLE ride (
 
 CREATE TABLE data_processed (
 	filename		varchar2(50),
+	bad_records		number,
 	primary key (filename));
 
 INSERT INTO gender VALUES (0, 'Unknown');
