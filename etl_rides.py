@@ -10,23 +10,19 @@ import shutil
 
 from bs4 import BeautifulSoup
 from datetime import datetime
+from retrying import retry
 from zipfile import ZipFile
 
 
 start_time = datetime.now()
 
-
-# Function to write SQL errors to a log file
-def log_error(batch, process):
-    if not os.path.exists('./log'):
-        os.makedirs('./log')
-    if len(batch) > 0:
-        f = open(f'./log/{process}.txt', 'a')
-        for error in batch:
-            f.write(f'{datetime.now()} error, {error.message}, "at row offset, {error.offset}\n')
-        f.close()
-        print(f'Log file written with {len(batch)} errors to ./log/{process}.txt')
-
+# Connect to Oracle Autonomous Data Warehouse using Wallet and local config file for user/pw storage
+config = configparser.ConfigParser()
+config.read('./auth/config.ini')
+username = config.get('oracle', 'username')
+password = config.get('oracle', 'password')
+connection = cx_Oracle.connect(username, password, 'dwaproject_high')
+cur = connection.cursor()
 
 # Function to download and extract zip files into memory
 def download_extract_zip(url):
@@ -36,14 +32,75 @@ def download_extract_zip(url):
             with thezip.open(zipinfo) as thefile:
                 yield zipinfo.filename, thefile
 
+# Function to remove bad records from the batch SQL statement
+# Writes a log file to identify bad records for review
+def remove_bad_obj(data, batcherror, log_filename, current_file):
+    if len(batcherror) < 101:
+        connection.rollback()  # Roll back any transactions made prior to error
+        data_count = len(data)
+        if not os.path.exists('./log'):
+            os.makedirs('./log')
+        
+        # Write a log file with the SQL error and the offset positions
+        f = open(f'./log/{log_filename}.txt', 'a')
+        for error in batcherror:
+            f.write(f'{datetime.now()}, {current_file}, {error.message}, "at row offset, {error.offset}\n')
+        f.close()
+        print(f'Log file written with {len(batcherror)} errors to ./log/{log_filename}.txt')
+        
+        bad_obj = [obj.offset for obj in batcherror] # Get a list of positional values where an error was encountered
+        bad_obj.reverse() # Since offset is positional, the code is reversed to start from high to low
+        for obj in bad_obj:
+            data.pop(obj)  # Remove the records 
+        if log_filename == 'new rides':
+            sql_insert_rides(data, log_filename, current_file, False)  # Rerun the SQL statement
+            connection.commit()  # Commit the batch insert to the DB
+            print(f'{data_count - len(batcherror)} rides have been inserted with errors removed.')
+        elif log_filename == 'historical stations':
+            sql_insert_station(data, log_filename, current_file)  # Rerun the SQL statement
+            connection.commit()  # Commit the batch insert to the DB
+            print(f'{data_count - len(batcherror)} stations have been inserted with errors removed.')
+    else:
+        f = open(f'./log/{log_filename}.txt', 'a')
+        f.write(f'{datetime.now()}, {current_file}, Over 100 errors, will skip this batch \n')
+        f.close()
+        print(f'Over 100 errors in {current_file} with {log_filename}, will skip this batch')
 
-# Connect to Oracle Autonomous Data Warehouse using Wallet and local config file for user/pw storage
-config = configparser.ConfigParser()
-config.read('./auth/config.ini')
-username = config.get('oracle', 'username')
-password = config.get('oracle', 'password')
-connection = cx_Oracle.connect(username, password, 'dwaproject_high')
-cur = connection.cursor()
+    
+# The SQL insert statement is wrapped in a function to use the retry function
+# The Oracle DB can return an error ORA-30036: unable to extend segment by 8 in undo
+# This error is caused by the Oracle DB running out of tablespace in the undo table
+# If an error is encountered, the code will wait 30 seconds before retrying and stop after 3 tries
+# By allowing time to pass, it will allow the existing transaction to complete, so the entire batch is not lost
+# A parameter called first_round is added to prevent some messages from being printed
+# Since the sql_insert functions and remove_bad_obj are recursively nested, the flag is used to determine if it is at the top level
+@retry(wait_fixed=30000, stop_max_attempt_number=3)
+def sql_insert_rides(rides, log_filename, current_file, first_round = True):
+    cur.executemany("""
+        INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
+        VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides, batcherrors=True)
+    bad_data = len(cur.getbatcherrors())
+    if bad_data == 0 and first_round:
+        connection.commit()
+        print(f'{len(rides)} rides have been inserted without error.')
+    elif bad_data > 0:
+        remove_bad_obj(rides, cur.getbatcherrors(), log_filename, current_file)
+    else:
+        pass
+    return bad_data
+
+@retry(wait_fixed=30000, stop_max_attempt_number=3)
+def sql_insert_station(stations, log_filename, current_file):
+    cur.executemany("""
+        INSERT into admin.station (stationid, stationname, stationlat, stationlong, zipcode)
+        VALUES(:1, :2, :3, :4, :5) """, stations, batcherrors=True)
+    if len(cur.getbatcherrors()) == 0:
+        connection.commit()
+        if len(stations) > 0:
+            print(f'{len(stations)} stations have been inserted.')
+    else:
+        remove_bad_obj(stations, cur.getbatcherrors(), log_filename, current_file)
+
 
 
 # Load Google Map API key
@@ -65,22 +122,22 @@ except Exception as e:
 
 
 # Check if files to be downloaded has already been processed
-processed = [filename for filename in cur.execute("SELECT * FROM admin.data_processed")]
+processed = [filename for filename in cur.execute("SELECT filename FROM admin.data_processed")]
 processed = [filename for tup in processed for filename in tup] # Convert a list of tuples to list of string
-new_zips = list(set(zip_files) - set(processed))
-
+new_zips = sorted(set(zip_files) - set(processed) - set(['201307-201402-citibike-tripdata.zip'])) # 201307-201402-citibike-tripdata.zip has its contents extracted already, remove duplicate effort
 
 print(f'Identified {len(new_zips)} new file(s).')
 
 # Loop to visit all new identified links on Citibike data website
-for value in new_zips:
-    # Get list of available stations in DB table station
+for zip_filename in new_zips:
+    # Get list of available stations in DB TABLE station
     # This code is inside the loop after each zip file download to get an updated list of available stations in the DB
     avail_station_id = [id for id in cur.execute("SELECT stationid FROM admin.station")]
-    avail_station_id = [id for tup in avail_station_id for id in tup] # Convert a list of tuples to list of numbers
+    avail_station_id = [id for tup in avail_station_id for id in tup]  # Convert a list of tuples to list of numbers
+    bad_records = 0
 
     # Downloads and extracts the zip files into memory
-    extracted = download_extract_zip(url + value)
+    extracted = download_extract_zip(url + zip_filename)
     
 
     # Creates an empty stations dataframe
@@ -90,9 +147,16 @@ for value in new_zips:
     
     # Loop that goes through all files in the zip extract
     for file in extracted:
-        if file[0].endswith(".csv") and file[0] not in processed: # Only process csv files not found in DB table data_processed
-            df = pd.read_csv(file[1])
-            print(f'\nProcessing {file[0]}')
+        # This code will update the processed list to make sure duplicate files are not reprocessed
+        processed = [filename for filename in cur.execute("SELECT filename FROM admin.data_processed")]
+        processed = [filename for tup in processed for filename in tup]  # Convert a list of tuples to list of string
+
+        filename = file[0]
+        fileobj = file[1]
+        
+        if filename.endswith(".csv") and filename not in processed and 'MACOSX' not in filename:  # Only process valid csv files not found in DB TABLE data_processed
+            print(f'\nProcessing {filename}')
+            df = pd.read_csv(fileobj, encoding='cp1252')
             original_row_count = df.shape[0]
             # Standardizes the column names for all CSV files
             df = df.rename(columns=({'Trip Duration':'tripduration',
@@ -118,11 +182,9 @@ for value in new_zips:
             miss_start = sum(df['start station id'].isna())
             if miss_start > 0:
                 df.dropna(subset=['start station id'], inplace=True)
-                print(f'{miss_start} rides were dropped due to missing start station id.')
             miss_end = sum(df['end station id'].isna())
             if miss_end > 0:
                 df.dropna(subset=['end station id'], inplace=True)
-                print(f'{miss_end} rides were dropped due to only missing end station id.')
 
             # There are some dummy station information, where lat/long is 0
             # These records were dropped
@@ -131,7 +193,10 @@ for value in new_zips:
             df = df[df['end station longitude'] != 0]
             df = df[df['end station latitude'] != 0]
             cleaned_row_count = df.shape[0]
-            print(f'{original_row_count - cleaned_row_count} rows were dropped due to bad station data.')
+            bad_stations = original_row_count - cleaned_row_count
+            bad_records += bad_stations
+            if bad_stations > 0:
+                print(f'{bad_stations} rides were dropped due to bad station data.')
 
             # Strips milliseconds from timestamp
             if (df["starttime"].str.len() > 19).any():
@@ -149,7 +214,7 @@ for value in new_zips:
 
 
             # Historical/defunct stations are not available in the Citibike station JSON feed
-            # This bit of code will look at stations not in the DB table station and insert the missing station information
+            # This bit of code will look at stations not in the DB TABLE station and insert the missing station information
             # Current station information will be processed by etl_station_city.py
             
             # Build a stations df with unique, but defunct records
@@ -186,63 +251,31 @@ for value in new_zips:
             # Add a new zip code column populating with data from the prior for loop
             stations['zip code'] = zipcodes
 
-            # Batch insert new station info into table station
+            # Batch insert new station info into TABLE station
             new_stations = stations.to_records(index=False).tolist()  # Convert df to a list of tuples
-            cur.executemany("""
-                INSERT into admin.station (stationid, stationname, stationlat, stationlong, zipcode)
-                VALUES(:1, :2, :3, :4, :5) """, new_stations, batcherrors=True)
-            log_error(cur.getbatcherrors(), 'historical stations')
-            connection.commit()
-            print(f'{len(new_stations) - len(cur.getbatcherrors())} stations have been inserted.')
-
-            # # The stations found in the above code are only defunct stations
-            # # Therefore, there is no need to update the data in the DB
-            # # Find existing stations that require update
-            # check_id = list(set(new_station_id) & set(exist_station_id))
-            # check_stations = stations[stations['station id'].isin(check_id)]
-            # check_stations = check_stations.to_records(index=False).tolist()  # Convert df to a list of tuples
-            # stations_to_update = list(set(check_stations) - set(exist_stations))
-            # stations_to_update = [list(tup) for tup in stations_to_update]  # Need to convert to list of list to use .pop method
-            # Move the station id to the end of the list
-            # This is due to bind variable is positional relative to the parameter
-            # Since the where clause is at the end, we need to shift station id to the end of the list
-            # [lst.append(lst.pop(0)) for lst in stations_to_update]
-            # # Batch update new station info into table station
-            # cur.executemany("""
-            #     UPDATE admin.station 
-            #     SET stationname = :1, stationlat = :2, stationlong = :3
-            #     WHERE stationid = :4 """, stations_to_update, batcherrors=True)
-            # for error in cur.getbatcherrors():
-            #     print("Error", error.message, "at row offset", error.offset)
-            # connection.commit()
-            # print(f'{len(stations_to_update) - len(cur.getbatcherrors())} stations has been updated.')
+            sql_insert_station(new_stations, 'historical stations', filename)
+            # remove_bad_obj(new_stations, station_error, 'historical stations', file[0])
+            
 
 
-
-            # Batch insert the ride info into the table ride
+            # Batch insert the ride info into the TABLE ride
             rides = df[['tripduration', 'starttime', 'stoptime', 'start station id', 'end station id', 'bikeid', 'usertype', 'birth year', 'gender']]
             rides = rides.to_records(index=False).tolist()  # Convert df to a list of tuples
             n = int(5e5)
             if len(rides) > n:
                 split_rides = [rides[i * n:(i + 1) * n] for i in range((len(rides) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
                 for rides_chunk in split_rides:
-                    cur.executemany("""
-                        INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
-                        VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides_chunk, batcherrors=True)
-                    log_error(cur.getbatcherrors(), 'new rides')
-                    connection.commit()
-                    print(f'{len(rides_chunk) - len(cur.getbatcherrors())} rides have been inserted.')
+                    bad_data = sql_insert_rides(rides_chunk, 'new rides', filename)
+                    bad_records += bad_data
+                    # remove_bad_obj(rides_chunk, rides_error, 'new rides', file[0])
             else:
-                cur.executemany("""
-                    INSERT INTO admin.ride (duration, starttime, stoptime, startstation, endstation, bikeid, usertype, birthyear, gender)
-                    VALUES(:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'), TO_DATE(:3, 'YYYY-MM-DD HH24:MI:SS'), :4, :5, :6, :7, :8, :9) """, rides, batcherrors=True)
-                log_error(cur.getbatcherrors(), 'new rides')
-                connection.commit()
-                print(f'{len(rides) - len(cur.getbatcherrors())} rides have been inserted.')
+                bad_data = sql_insert_rides(rides, 'new rides', filename)
+                bad_records += bad_data
+                # remove_bad_obj(rides, rides_error, 'new rides', file[0])
 
-            # Updated the TABLE data_processed
-            cur.execute("""INSERT INTO admin.data_processed VALUES(:filename)""", filename = file[0] + ".zip")
-            connection.commit()
+    # Updated the TABLE data_processed
+    cur.execute("""INSERT INTO admin.data_processed VALUES(:filename, :count)""", filename = zip_filename, count = bad_records)
+    connection.commit()
 
 cur.close()
 connection.close()
