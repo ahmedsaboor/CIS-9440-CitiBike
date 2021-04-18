@@ -1,0 +1,1 @@
+This code was archived due to not meeting the requirements for the project. While this code is fully functional, the requirements stipulated that the design of the database was to be a dimensional model rather than a relational model. As such, this archive folder was created to keep a record in case such code is needed.
