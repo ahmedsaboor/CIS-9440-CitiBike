@@ -437,7 +437,7 @@ for zip_filename in new_zips:
             ridership = ridership.to_records(index=False).tolist()  # Convert df to a list of tuples
             n = int(5e5)
             if len(ridership) > n:
-                split_ridership = [ridership[i * n:(i + 1) * n] for i in range((len(bikes) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
+                split_ridership = [ridership[i * n:(i + 1) * n] for i in range((len(ridership) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
                 for ridership_chunk in split_ridership:
                     bad_data = sql_insert_ridership(ridership_chunk, 'new ridership', filename)
                     # bad_records += bad_data
