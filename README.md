@@ -25,6 +25,6 @@ password = password
 api = api_key
 ```
 
-The library cx_Oracle requires some .dll files. Download [Oracle Instant Client](https://www.oracle.com/database/technologies/instant-client/winx64-64-downloads.html) and extract the .dll files into your Python or virtual environment.
+The library cx_Oracle requires some .dll files. Download [Oracle Instant Client Basic Package](https://www.oracle.com/database/technologies/instant-client/winx64-64-downloads.html) and extract the contents into your Python or virtual environment.
 
 Update the Easy Connect String in etl*.py with the appropriate TNS name. 
