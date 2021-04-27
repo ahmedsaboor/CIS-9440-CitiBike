@@ -138,7 +138,7 @@ def sql_insert_date(data, log_filename, current_file):
         VALUES(:1, :2, :3, :4, :5, :6) """, data, batcherrors=True)
     if len(cur.getbatcherrors()) == 0:
         connection.commit()
-        if len(stations) > 0:
+        if len(data) > 0:
             print(f'{len(data)} dates have been inserted.')
     else:
         remove_bad_obj(data, cur.getbatcherrors(), log_filename, current_file)
@@ -150,7 +150,7 @@ def sql_insert_user(data, log_filename, current_file):
         VALUES(:1, :2, :3, :4, :5) """, data, batcherrors=True)
     if len(cur.getbatcherrors()) == 0:
         connection.commit()
-        if len(stations) > 0:
+        if len(data) > 0:
             print(f'{len(data)} users have been inserted.')
     else:
         remove_bad_obj(data, cur.getbatcherrors(), log_filename, current_file)
@@ -168,8 +168,8 @@ data_files = soup.find_all('key')
 zip_files = []
 try:
     for file in range(len(data_files) - 1):
-        if 'JC' not in data_files[file].get_text() and '202012' not in data_files[file].get_text() and '202011' not in data_files[file].get_text():
-            if '2020' in data_files[file].get_text() or '2019' in data_files[file].get_text() or '2018' in data_files[file].get_text():
+        if 'JC' not in data_files[file].get_text():
+            if '2021' in data_files[file].get_text() or '2020' in data_files[file].get_text() or '2019' in data_files[file].get_text() or '2018' in data_files[file].get_text():
                 zip_files.append(data_files[file].get_text())
 except Exception as e:
     print(f"Failed {e}")
@@ -180,6 +180,8 @@ processed = [filename for tup in processed for filename in tup] # Convert a list
 new_zips = sorted(set(zip_files) - set(processed) - set(['201307-201402-citibike-tripdata.zip']), reverse = True) # 201307-201402-citibike-tripdata.zip has its contents extracted already, remove duplicate effort
 
 print(f'Identified {len(new_zips)} new file(s).')
+
+total_records = 0
 
 # Loop to visit all new identified links on Citibike data website
 for zip_filename in new_zips:
@@ -199,7 +201,7 @@ for zip_filename in new_zips:
         
         if filename.endswith(".csv") and filename not in processed and 'MACOSX' not in filename:  # Only process valid csv files not found in DB TABLE data_processed
             print(f'\nProcessing {filename}')
-
+            
             # Get list of available stations in DB TABLE station_dimension
             # This code is inside the loop after each zip file download to get an updated list of available stations in the DB
             avail_station_id = [id for id in cur.execute("SELECT station_id FROM admin.station_dimension")]
@@ -212,6 +214,7 @@ for zip_filename in new_zips:
 
             df = pd.read_csv(fileobj, encoding='cp1252')
             original_row_count = df.shape[0]
+            total_records += original_row_count
             # Standardizes the column names for all CSV files
             df = df.rename(columns=({'Trip Duration':'tripduration',
                                     'Start Time':'starttime',
@@ -359,11 +362,14 @@ for zip_filename in new_zips:
             df['weekday'] = df['starttime'].dt.day_name()
             df['starttime'] = pd.to_datetime(df['starttime']).dt.strftime('%Y%m%d') # Convert datetime back to string
             date_dim = df[['starttime', 'day', 'week', 'month', 'year', 'weekday']].drop_duplicates()
+            date_db = [dates[0] for dates in cur.execute("SELECT date_id FROM admin.date_dimension")] # Convert a list of tuples to a list of ints
+            new_dates = list(set(date_dim['starttime'].astype(int).to_list()) - set(date_db))
 
-
-            # Batch insert date_dim into the DB TABLE date_dimension
-            date_dim_db = date_dim.to_records(index=False).tolist()  # Convert df to a list of tuples
-            sql_insert_date(date_dim_db, 'dates', filename)
+            if len(new_dates) > 0:
+                # Batch insert date_dim into the DB TABLE date_dimension
+                date_dim = date_dim[date_dim['starttime'].isin(new_dates)]
+                date_dim_db = date_dim.to_records(index=False).tolist()  # Convert df to a list of tuples
+                sql_insert_date(date_dim_db, 'dates', filename)
 
 
             # Look up the DB to find the route id associated to the route path
@@ -421,12 +427,12 @@ for zip_filename in new_zips:
             if len(bikes) > n:
                 split_bikes = [bikes[i * n:(i + 1) * n] for i in range((len(bikes) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
                 for bikes_chunk in split_bikes:
-                    bad_data = sql_insert_bikes(bikes_chunk, 'new bikes', filename)
-                    bad_records += bad_data
+                    bad_rows = sql_insert_bikes(bikes_chunk, 'new bikes', filename)
+                    bad_records += bad_rows
                     # remove_bad_obj(rides_chunk, rides_error, 'new rides', file[0])
             else:
-                bad_data = sql_insert_bikes(bikes, 'new bikes', filename)
-                bad_records += bad_data
+                bad_rows = sql_insert_bikes(bikes, 'new bikes', filename)
+                bad_records += bad_rows
                 # remove_bad_obj(rides, rides_error, 'new rides', file[0])
             
 
@@ -439,12 +445,12 @@ for zip_filename in new_zips:
             if len(ridership) > n:
                 split_ridership = [ridership[i * n:(i + 1) * n] for i in range((len(ridership) + n - 1) // n)]  # Breaks up batch insert to size of n = 5e5
                 for ridership_chunk in split_ridership:
-                    bad_data = sql_insert_ridership(ridership_chunk, 'new ridership', filename)
-                    # bad_records += bad_data
+                    bad_rows = sql_insert_ridership(ridership_chunk, 'new ridership', filename)
+                    # bad_records += bad_rows
                     # remove_bad_obj(rides_chunk, rides_error, 'new rides', file[0])
             else:
-                bad_data = sql_insert_bikes(ridership, 'new ridership', filename)
-                # bad_records += bad_data
+                bad_rows = sql_insert_bikes(ridership, 'new ridership', filename)
+                # bad_records += bad_rows
                 # remove_bad_obj(rides, rides_error, 'new rides', file[0])
 
     # Updated the TABLE data_processed
@@ -458,3 +464,4 @@ connection.close()
 end_time = datetime.now()
 print(end_time - start_time)
 
+print(f'Total records: {total_records}')
