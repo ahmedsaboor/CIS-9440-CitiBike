@@ -7,7 +7,6 @@ import numpy as np
 import os
 import pandas as pd
 import requests
-import shutil
 
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -18,6 +17,7 @@ from zipfile import ZipFile
 start_time = datetime.now()
 
 # Connect to Oracle Autonomous Data Warehouse using Wallet and local config file for user/pw storage
+# If using a different Oracle Client version, update the below path as needed
 cx_Oracle.init_oracle_client(lib_dir=".venv/instantclient_19_10")
 config = configparser.ConfigParser()
 config.read('./auth/config.ini')
@@ -72,6 +72,10 @@ def remove_bad_obj(data, batcherror, log_filename, current_file):
             print(f'{data_count - len(batcherror)} dates have been inserted with errors removed.')
         elif log_filename == 'users':
             sql_insert_user(data, log_filename, current_file, False)  # Rerun the SQL statement
+            connection.commit()  # Commit the batch insert to the DB
+            print(f'{data_count - len(batcherror)} users have been inserted with errors removed.')
+        elif log_filename == 'new routes':
+            sql_insert_route(data, log_filename, current_file, False)  # Rerun the SQL statement
             connection.commit()  # Commit the batch insert to the DB
             print(f'{data_count - len(batcherror)} users have been inserted with errors removed.')
     else:
@@ -155,6 +159,18 @@ def sql_insert_user(data, log_filename, current_file):
     else:
         remove_bad_obj(data, cur.getbatcherrors(), log_filename, current_file)
 
+@retry(wait_fixed=30000, stop_max_attempt_number=3)
+def sql_insert_route(data, log_filename, current_file):
+    cur.executemany("""
+        INSERT into admin.route_dimension (routepath_id, route_path_bor)
+        VALUES(:1, :2) """, data, batcherrors=True)
+    if len(cur.getbatcherrors()) == 0:
+        connection.commit()
+        if len(data) > 0:
+            print(f'{len(data)} routes have been inserted.')
+    else:
+        remove_bad_obj(data, cur.getbatcherrors(), log_filename, current_file)
+
 # Load Google Map API key
 gg_api = config.get('google', 'api')
 gg_url = 'https://maps.googleapis.com/maps/api/geocode/json'
@@ -167,6 +183,7 @@ soup = BeautifulSoup(r.text, features='html.parser')
 data_files = soup.find_all('key')
 zip_files = []
 try:
+    # For this project, the data was limited to only NYC data and years starting from 2018
     for file in range(len(data_files) - 1):
         if 'JC' not in data_files[file].get_text():
             if '2021' in data_files[file].get_text() or '2020' in data_files[file].get_text() or '2019' in data_files[file].get_text() or '2018' in data_files[file].get_text():
@@ -208,10 +225,11 @@ for zip_filename in new_zips:
             avail_station_id = [id for tup in avail_station_id for id in tup]  # Convert a list of tuples to list of numbers
             bad_records = 0
 
-            # Creates an empty stations dataframe
+            # Creates an empty dataframe to store station information
             station_schema = ['station id', 'station name', 'station longitude', 'station latitude']
             stations = pd.DataFrame(columns=station_schema)
 
+            # Read the file object from memory and load into a Pandas df
             df = pd.read_csv(fileobj, encoding='cp1252')
             original_row_count = df.shape[0]
             total_records += original_row_count
@@ -235,7 +253,7 @@ for zip_filename in new_zips:
             # Cleans NaN data
             df['usertype'].fillna('', inplace=True)
             df['birth year'] = pd.to_numeric(df['birth year'], errors='coerce') # Forces \N values to NaN
-            df['birth year'].fillna(0, inplace=True) # Changes NaN to 0
+            df['birth year'].fillna(1800, inplace=True) # Changes NaN to 1800
             miss_start = sum(df['start station id'].isna())
             if miss_start > 0:
                 df.dropna(subset=['start station id'], inplace=True)
@@ -285,7 +303,7 @@ for zip_filename in new_zips:
             stations = stations.dropna()
             stations = stations[~stations['station id'].isin(avail_station_id)]  # Filter out station id that already exists in the DB station
             
-            # Only use Google Reverse Geocode and run sql_insert_station if there are historical stations to add
+            # Use Google Reverse Geocode API and run sql_insert_station if there are historical stations to add
             if stations.shape[0] > 0:
                 # Create a list of lat/long pair
                 coord = (stations['station longitude'].astype(str) + ',' + stations['station latitude'].astype(str)).tolist()
@@ -361,18 +379,26 @@ for zip_filename in new_zips:
             df['year'] = df['starttime'].dt.year
             df['weekday'] = df['starttime'].dt.day_name()
             df['starttime'] = pd.to_datetime(df['starttime']).dt.strftime('%Y%m%d') # Convert datetime back to string
+
+            # Reorder the date dimension table to match the schema of the DB
             date_dim = df[['starttime', 'day', 'week', 'month', 'year', 'weekday']].drop_duplicates()
             date_db = [dates[0] for dates in cur.execute("SELECT date_id FROM admin.date_dimension")] # Convert a list of tuples to a list of ints
+
+            # Use a set comparision to identify new dates to be added
             new_dates = list(set(date_dim['starttime'].astype(int).to_list()) - set(date_db))
 
             if len(new_dates) > 0:
                 # Batch insert date_dim into the DB TABLE date_dimension
-                date_dim = date_dim[date_dim['starttime'].isin(new_dates)]
+                date_dim = date_dim[date_dim['starttime'].astype('int').isin(new_dates)]
                 date_dim_db = date_dim.to_records(index=False).tolist()  # Convert df to a list of tuples
                 sql_insert_date(date_dim_db, 'dates', filename)
 
+            # Concatenate the start and end station names to create the unique route
+            df['route_path'] = df['start station name'] + ' to ' + df['end station name']
 
-            # Look up the DB to find the route id associated to the route path
+            # Run a SQL query to get the borough information from the DB
+            # Since borough information was obtained from the reverse geocode API, running it for each records would be expensive
+            # This information is stored in the DB, either from etl_station_city.py or the earlier code to get historical stations
             updated_start_station = [stations for stations in cur.execute("SELECT station_id, borough FROM admin.station_dimension")]
             updated_start_station = pd.DataFrame(updated_start_station, columns=['start station id', 'start_borough'])
             updated_end_station = [stations for stations in cur.execute("SELECT station_id, borough FROM admin.station_dimension")]
@@ -381,23 +407,32 @@ for zip_filename in new_zips:
             df = df.merge(updated_end_station, on='end station id', how='left')
             df['bor2bor'] = df['start_borough'] + ' to ' + df['end_borough']
 
+            # Missing data values can cause issues when running the batch upload into the DB
+            # Rather than trying to identifying and fixing these records, their count is miniscule compared to the overall count
+            # It was simplier to just drop these records
+            df = df.dropna()
+
+
+            # Get an updated list of route paths from the DB
+            # Do a set commparison to only add new routes identified in the raw data
             route_dim = [routes for routes in cur.execute("SELECT routepath_id, route_path_bor FROM admin.route_dimension")]
-            route_dim = pd.DataFrame(route_dim, columns=['routeid', 'bor2bor'])
-            df = df.merge(route_dim, on='bor2bor', how='left')
+            route_df = df[['route_path', 'bor2bor']].drop_duplicates()
+            route_list = route_df.to_records(index=False).tolist()  # Convert df to a list of tuples
+            new_routes = list(set(route_list) - set(route_dim))
+            sql_insert_route(new_routes, 'new routes', filename)
 
             # Create a df user_dim to populate into the DB TABLE User_Dimension
             user_dim = df[['usertype', 'birth year', 'gender']].drop_duplicates()
             user_dim['age'] = datetime.now().year - user_dim['birth year']
             user_dim = user_dim[['usertype', 'birth year', 'age', 'gender']]
-
             user_dim_list = user_dim.to_records(index=False).tolist()  # Convert df to a list of tuples
             user_dim_db = [user for user in cur.execute("SELECT usertype, birth_year, age, gender FROM admin.user_dimension")]
 
             # Only add users that do not exist in the DB
             new_users = list(set(user_dim_list) - set(user_dim_db))
 
-            # Convert list of new users to a df
-            # Need to add gender name
+            # Convert the list of new users to a df
+            # This step is needed to help convert gender id to gender name
             new_users = pd.DataFrame(new_users, columns = ['usertype', 'birth year', 'age', 'gender'])
             conditions = [
                 (new_users['gender'] == 0),
@@ -408,6 +443,7 @@ for zip_filename in new_zips:
             new_users = new_users.to_records(index=False).tolist()  # Convert df to a list of tuples
             sql_insert_user(new_users, 'users', filename)
 
+            # Since the DB is using an auto-generated ID as the primary key, we will need to query back the DB to get this value
             updated_user_dim_db = cur.execute("SELECT user_id, usertype, birth_year, age, gender FROM admin.user_dimension")
             updated_user_dim_db = [user for user in updated_user_dim_db]
             updated_user_df = pd.DataFrame(updated_user_dim_db, columns = ['user_id', 'usertype', 'birthyear', 'age', 'gender'])
@@ -419,7 +455,7 @@ for zip_filename in new_zips:
 
 
             # Batch insert the ride info into the TABLE BikeUsage_Fact
-            bikes = df[['bikeid', 'routeid', 'start station id', 'end station id', 'starttime', 'tripduration']]
+            bikes = df[['bikeid', 'route_path', 'start station id', 'end station id', 'starttime', 'tripduration']]
             bikes = bikes.dropna() # Drop records that do not have a route path
             bikes['starttime'] = bikes['starttime'].astype(str).astype(int)
             bikes = bikes.to_records(index=False).tolist()  # Convert df to a list of tuples
