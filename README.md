@@ -1,7 +1,19 @@
 # Software, Libraries, and API Used
 
 - [Oracle Autonomous Data Warehouse](https://www.oracle.com/autonomous-database/autonomous-data-warehouse/)
-- Python 3.8.5 requests bs4 shutil os zipfile cx_Oracle configparser pandas datetime json
+- Python 3.8.5 
+- - BeautifulSoup 
+- - configparser 
+- - cx_Oracle
+- - datetime
+- - io 
+- - json 
+- - numpy 
+- - os 
+- - pandas
+- - requests
+- - retrying
+- - zipfile
 - [Tableau Desktop](https://www.tableau.com/products/desktop)
 - [Google Map Reverse Geocode API](https://developers.google.com/maps/documentation/geocoding/overview#ReverseGeocoding)
 
